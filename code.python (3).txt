@@ -1,12 +1,12 @@
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
+from werkzeug.exceptions import BadRequest
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///students.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# Student Model
 class Student(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
@@ -16,59 +16,130 @@ class Student(db.Model):
     parent_contact = db.Column(db.String(15), nullable=False)
     address = db.Column(db.String(200), nullable=False)
 
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'age': self.age,
+            'grade_level': self.grade_level,
+            'parent_name': self.parent_name,
+            'parent_contact': self.parent_contact,
+            'address': self.address
+        }
+
 # Create the database
 with app.app_context():
     db.create_all()
 
-# Get all students
+# Error handlers
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify(error=str(e)), 400
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify(error="Resource not found"), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify(error="Internal server error"), 500
+
+# Helper function for request validation
+def validate_student_data(data, is_update=False):
+    required_fields = ['name', 'age', 'grade_level', 'parent_name', 'parent_contact', 'address']
+    
+    if not isinstance(data, dict):
+        raise BadRequest("Invalid JSON data")
+    
+    if not is_update:
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            raise BadRequest(f"Missing required fields: {', '.join(missing_fields)}")
+    
+    # Validate individual fields
+    if 'name' in data and not isinstance(data['name'], str):
+        raise BadRequest("Name must be a string")
+    
+    if 'age' in data and (not isinstance(data['age'], int) or data['age'] < 0):
+        raise BadRequest("Age must be a positive integer")
+        
+    if 'parent_contact' in data and not data['parent_contact'].isdigit():
+        raise BadRequest("Parent contact must contain only digits")
+
+# Get all students with pagination
 @app.route('/students', methods=['GET'])
 def get_students():
-    students = Student.query.all()
-    return jsonify([[student.id, student.name, student.age, student.grade_level, student.parent_name, student.parent_contact, student.address] for student in students])
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    
+    students = Student.query.paginate(page=page, per_page=per_page, error_out=False)
+    return jsonify({
+        'students': [student.to_dict() for student in students.items],
+        'total': students.total,
+        'pages': students.pages,
+        'current_page': students.page
+    })
 
 # Get a single student
 @app.route('/students/<int:id>', methods=['GET'])
 def get_student(id):
     student = Student.query.get_or_404(id)
-    return jsonify([student.id, student.name, student.age, student.grade_level, student.parent_name, student.parent_contact, student.address])
+    return jsonify(student.to_dict())
 
 # Add a new student
 @app.route('/students', methods=['POST'])
 def add_student():
-    data = request.get_json()
-    new_student = Student(
-        name=data['name'],
-        age=data['age'],
-        grade_level=data['grade_level'],
-        parent_name=data['parent_name'],
-        parent_contact=data['parent_contact'],
-        address=data['address']
-    )
-    db.session.add(new_student)
-    db.session.commit()
-    return jsonify({'message': 'Student added successfully!'}), 201
+    try:
+        data = request.get_json()
+        validate_student_data(data)
+        
+        new_student = Student(
+            name=data['name'],
+            age=data['age'],
+            grade_level=data['grade_level'],
+            parent_name=data['parent_name'],
+            parent_contact=data['parent_contact'],
+            address=data['address']
+        )
+        
+        db.session.add(new_student)
+        db.session.commit()
+        
+        return jsonify(new_student.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        raise BadRequest(str(e))
 
 # Update a student
 @app.route('/students/<int:id>', methods=['PUT'])
 def update_student(id):
-    data = request.get_json()
-    student = Student.query.get_or_404(id)
-    student.name = data['name']
-    student.age = data['age']
-    student.grade_level = data['grade_level']
-    student.parent_name = data['parent_name']
-    student.parent_contact = data['parent_contact']
-    student.address = data['address']
-    db.session.commit()
-    return jsonify({'message': 'Student updated successfully!'})
+    try:
+        student = Student.query.get_or_404(id)
+        data = request.get_json()
+        
+        validate_student_data(data, is_update=True)
+        
+        for field in ['name', 'age', 'grade_level', 'parent_name', 'parent_contact', 'address']:
+            if field in data:
+                setattr(student, field, data[field])
+                
+        db.session.commit()
+        return jsonify(student.to_dict())
+    except Exception as e:
+        db.session.rollback()
+        raise BadRequest(str(e))
 
 # Delete a student
 @app.route('/students/<int:id>', methods=['DELETE'])
 def delete_student(id):
-    student = Student.query.get_or_404(id)
-    db.session.delete(student)
-    db.session.commit()
-    return jsonify({'message': 'Student deleted successfully!'})
+    try:
+        student = Student.query.get_or_404(id)
+        db.session.delete(student)
+        db.session.commit()
+        return jsonify({'message': 'Student deleted successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        raise BadRequest(str(e))
 
 if __name__ == '__main__':
     app.run(debug=True)
